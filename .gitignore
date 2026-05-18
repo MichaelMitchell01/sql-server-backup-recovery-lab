@@ -1,0 +1,11 @@
+Data/
+Backups/
+Restore/
+
+*.mdf
+*.ldf
+*.bak
+*.trn
+
+*.log
+*.tmp
