@@ -32,7 +32,18 @@ jobs:
 
       - name: Wait for SQL Server
         run: |
-          for i in {1..30}; do
+          echo "Initial container status:"
+          docker ps -a --filter name=sqlserver
+
+          for i in {1..90}; do
+
+            if [ "$(docker inspect -f '{{.State.Running}}' sqlserver 2>/dev/null)" != "true" ]; then
+              echo "SQL Server container stopped during startup."
+              echo "Container logs:"
+              docker logs sqlserver
+              exit 1
+            fi
+
             if docker exec \
               -e SQLCMDPASSWORD="$SA_PASSWORD" \
               sqlserver \
@@ -46,11 +57,27 @@ jobs:
               exit 0
             fi
 
-            echo "Waiting for SQL Server..."
+            echo "Waiting for SQL Server... attempt $i of 90"
             sleep 2
           done
 
+          echo "SQL Server did not become ready."
+          echo "Container status:"
+          docker ps -a --filter name=sqlserver
+
+          echo "SQL Server logs:"
           docker logs sqlserver
+
+          echo "Final sqlcmd connection test:"
+          docker exec \
+            -e SQLCMDPASSWORD="$SA_PASSWORD" \
+            sqlserver \
+            /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost \
+            -U sa \
+            -C \
+            -Q "SELECT 1"
+
           exit 1
 
       - name: Create backup and restore directories
