@@ -1,4 +1,5 @@
 # SQL Server Backup, Restore, and Point-in-Time Recovery Lab
+![SQL Server CI/CD](https://github.com/YOUR_USERNAME/YOUR_REPOSITORY/actions/workflows/sqlserver-ci-cd.yml/badge.svg)
 
 ## Overview
 
