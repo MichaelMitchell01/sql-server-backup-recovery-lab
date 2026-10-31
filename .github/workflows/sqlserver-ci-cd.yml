@@ -1,0 +1,187 @@
+name: SQL Server CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: SQL Server Integration Test
+    runs-on: ubuntu-latest
+
+    env:
+      SA_PASSWORD: ${{ secrets.SQL_SA_PASSWORD }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Start SQL Server
+        run: |
+          docker run -d \
+            --name sqlserver \
+            -e ACCEPT_EULA=Y \
+            -e MSSQL_SA_PASSWORD="$SA_PASSWORD" \
+            -p 1433:1433 \
+            mcr.microsoft.com/mssql/server:2025-latest
+
+      - name: Wait for SQL Server
+        run: |
+          for i in {1..30}; do
+            if docker exec \
+              -e SQLCMDPASSWORD="$SA_PASSWORD" \
+              sqlserver \
+              /opt/mssql-tools18/bin/sqlcmd \
+              -S localhost \
+              -U sa \
+              -C \
+              -Q "SELECT 1" > /dev/null 2>&1
+            then
+              echo "SQL Server is ready."
+              exit 0
+            fi
+
+            echo "Waiting for SQL Server..."
+            sleep 2
+          done
+
+          docker logs sqlserver
+          exit 1
+
+      - name: Create backup and restore directories
+        run: |
+          docker exec -u 0 sqlserver bash -c "
+            mkdir -p /var/opt/mssql/backup/full &&
+            mkdir -p /var/opt/mssql/backup/log &&
+            mkdir -p /var/opt/mssql/restore &&
+            chown -R mssql:mssql /var/opt/mssql/backup &&
+            chown -R mssql:mssql /var/opt/mssql/restore
+          "
+
+      - name: Prepare SQL scripts for Linux CI
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          replacements = {
+              r"C:\SQLLab\Data": "/var/opt/mssql/data",
+              r"C:\SQLLab\Backups\Full": "/var/opt/mssql/backup/full",
+              r"C:\SQLLab\Backups\Log": "/var/opt/mssql/backup/log",
+              r"C:\SQLLab\Restore": "/var/opt/mssql/restore",
+          }
+
+          source = Path("Scripts")
+          target = Path(".ci-scripts")
+          target.mkdir(exist_ok=True)
+
+          for script in source.glob("*.sql"):
+              text = script.read_text(encoding="utf-8-sig")
+
+              for old, new in replacements.items():
+                  text = text.replace(old, new)
+
+              (target / script.name).write_text(
+                  text,
+                  encoding="utf-8"
+              )
+          PY
+
+      - name: Copy SQL scripts into container
+        run: |
+          docker cp .ci-scripts/. sqlserver:/tmp/sql/
+          docker cp CI/. sqlserver:/tmp/ci/
+
+      - name: Run database setup
+        run: |
+          docker exec \
+            -e SQLCMDPASSWORD="$SA_PASSWORD" \
+            sqlserver \
+            /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -C -b \
+            -i /tmp/sql/01_setup_databases.sql
+
+      - name: Create admin objects
+        run: |
+          docker exec \
+            -e SQLCMDPASSWORD="$SA_PASSWORD" \
+            sqlserver \
+            /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -C -b \
+            -i /tmp/sql/02_create_admin_objects.sql
+
+      - name: Run full backup and validation restore
+        run: |
+          docker exec \
+            -e SQLCMDPASSWORD="$SA_PASSWORD" \
+            sqlserver \
+            /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -C -b \
+            -i /tmp/sql/03_pass1_full_restore_validation.sql
+
+      - name: Prepare PITR test
+        run: |
+          docker exec \
+            -e SQLCMDPASSWORD="$SA_PASSWORD" \
+            sqlserver \
+            /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -C -b \
+            -i /tmp/sql/04_prepare_pitr_test.sql
+
+      - name: Execute PITR restore
+        run: |
+          docker exec \
+            -e SQLCMDPASSWORD="$SA_PASSWORD" \
+            sqlserver \
+            /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -C -b \
+            -i /tmp/sql/05_execute_pitr_restore.sql
+
+      - name: Run final verification
+        run: |
+          docker exec \
+            -e SQLCMDPASSWORD="$SA_PASSWORD" \
+            sqlserver \
+            /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -C -b \
+            -i /tmp/sql/06_final_verification.sql
+
+      - name: Run CI assertions
+        run: |
+          docker exec \
+            -e SQLCMDPASSWORD="$SA_PASSWORD" \
+            sqlserver \
+            /opt/mssql-tools18/bin/sqlcmd \
+            -S localhost -U sa -C -b \
+            -i /tmp/ci/01_assertions.sql
+
+  deliver:
+    name: Build Deployment Artifact
+    needs: test
+
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Build deployment package
+        run: |
+          mkdir deployment
+          cp README.md deployment/
+          cp -R Scripts deployment/
+          cp -R CI deployment/
+
+          zip -r sql-server-recovery-lab.zip deployment
+
+      - name: Upload deployment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-server-recovery-lab-${{ github.sha }}
+          path: sql-server-recovery-lab.zip
